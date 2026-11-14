@@ -1,0 +1,19 @@
+{
+  "method": "DORA exploratory candidate matching",
+  "primary_modis_platform": "Aqua",
+  "common_dates": [
+    "2026-11-09",
+    "2026-11-10",
+    "2026-11-11",
+    "2026-11-14"
+  ],
+  "modis_aqua_observations": 1084,
+  "viirs_observations": 2263,
+  "spatial_candidates_within_5km": 1087,
+  "baseline_radius_km": 2.0,
+  "baseline_time_window_minutes": 240.0,
+  "baseline_candidate_pairs": 203,
+  "baseline_unique_modis": 140,
+  "baseline_unique_viirs": 165,
+  "warning": "Candidate relationships are not confirmed fire-event matches. Unmatched means no candidate under these criteria, not a confirmed sensor miss."
+}

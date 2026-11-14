@@ -1,0 +1,22 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+data/raw/
+data/processed/*
+!data/processed/
+!data/processed/dora_ambiguity_summary.json
+!data/processed/dora_candidate_pairs.csv
+!data/processed/dora_observation_status.csv
+!data/processed/dora_ranked_candidates.csv
+!data/processed/dora_run_summary.json
+!data/processed/dora_spatial_candidates_5km.csv
+!data/processed/dora_threshold_sensitivity.csv
+!data/processed/harmonized_observations.csv
+
+# Local backup files
+*.backup
+
+# Local reproducibility snapshots
+reports/

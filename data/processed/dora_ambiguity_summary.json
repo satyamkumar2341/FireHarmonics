@@ -1,0 +1,16 @@
+{
+  "method": "DORA candidate ambiguity analysis",
+  "candidate_pairs": 203,
+  "unique_modis_observations": 140,
+  "unique_viirs_observations": 165,
+  "modis_multiple_candidate_observations": 40,
+  "viirs_multiple_candidate_observations": 36,
+  "ambiguity_pair_distribution": {
+    "ambiguous_for_modis": 69,
+    "unique_on_both_sides": 60,
+    "ambiguous_for_viirs": 40,
+    "ambiguous_on_both_sides": 34
+  },
+  "ranking_rule": "Ascending distance, then ascending absolute time gap. Ranks are investigation priorities, not match probabilities.",
+  "warning": "Candidate rankings do not establish confirmed fire-event matches or sensor detection accuracy."
+}

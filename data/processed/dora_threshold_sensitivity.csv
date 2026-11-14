@@ -1,0 +1,10 @@
+radius_km,time_window_minutes,candidate_pairs,unique_modis_observations,unique_viirs_observations
+1,60,0,0,0
+1,120,20,13,20
+1,240,61,42,60
+2,60,0,0,0
+2,120,42,30,32
+2,240,203,140,165
+5,60,0,0,0
+5,120,154,98,75
+5,240,1087,541,501
