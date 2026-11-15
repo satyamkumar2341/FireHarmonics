@@ -1,4 +1,4 @@
-﻿# FireHarmonics
+# FireHarmonics
 NASA Space Apps Challenge 2026
 
 An independent project exploring harmonization of MODIS and VIIRS active-fire observations using NASA FIRMS data.
@@ -51,6 +51,50 @@ Baseline exploratory criteria: 2 km spatial radius, 240 minutes, same acquisitio
 
 These are exploratory candidate relationships, not confirmed fire-event matches or accuracy measurements. Candidate rankings are investigation priorities, not match probabilities.
 
+## Cross-Sensor FRP Comparability
+
+Exploratory comparison of MODIS Aqua with candidate VIIRS NOAA-20 and NOAA-21 observations, using the 5 km DORA candidate file.
+
+### Raw platform observations
+
+| Platform | Observations | Median FRP (MW) | Mean FRP (MW) | 90th percentile FRP (MW) |
+|---|---:|---:|---:|---:|
+| MODIS Aqua | 1,084 | 14.93 | 21.07 | 40.52 |
+| MODIS Terra | 10 | 8.04 | 9.75 | 13.575 |
+| VIIRS NOAA-20 | 2,448 | 4.18 | 5.90 | 11.59 |
+| VIIRS NOAA-21 | 2,206 | 4.55 | 6.09 | 11.46 |
+
+### One-to-one candidate comparison
+
+FRP ratio = VIIRS FRP / MODIS FRP.
+
+| Platform | Candidate pairs | One-to-one pairs | Median FRP ratio | Median FRP difference | Median distance | Median time gap |
+|---|---:|---:|---:|---:|---:|---:|
+| NOAA-20 | 80 | 52 | 0.2718 | -72.82% | 1.405 km | 172 min |
+| NOAA-21 | 123 | 80 | 0.4303 | -56.97% | 1.227 km | 137 min |
+
+### Date-cluster bootstrap
+
+| Platform | Pairs | Unique dates | Median daily ratio | 95% bootstrap interval |
+|---|---:|---:|---:|---:|
+| NOAA-20 | 52 | 4 | 0.2861 | 0.2169-0.3003 |
+| NOAA-21 | 80 | 4 | 0.2841 | 0.1115-0.5588 |
+
+These estimates use only four unique dates per platform and are limited exploratory evidence.
+
+### Interpretation and limitations
+
+- Ratios below 1 indicate lower VIIRS FRP within selected candidate associations; they do not establish general sensor bias.
+- Candidate associations are not verified same-fire matches or independent ground truth.
+- These results are not calibration factors, accuracy estimates, or justification for calibration corrections.
+- MODIS numeric confidence and VIIRS low/nominal/high categories retain their native meanings and are not interchangeable.
+- Platform distributions are affected by coverage, acquisition timing, sampling, and detected-observation characteristics.
+- The small number of date clusters limits the strength and generalizability of bootstrap estimates.
+- MODIS Terra has only 10 observations in this production snapshot.
+
+Reproduce the analysis:
+
+    python scripts/run_sensor_comparability.py --observations data/processed/harmonized_observations.csv --candidates data/processed/dora_spatial_candidates_5km.csv --output-dir data/processed
 ## Dashboard
 
 The Streamlit dashboard includes:
@@ -115,7 +159,7 @@ Run automated tests:
 python -m pytest -q
 ```
 
-Latest verified test result on November 15, 2026: **27 passed**.
+Latest verified test result on November 15, 2026: **51 passed**.
 
 ## Scientific Limitations
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from collections import Counter
 
 import pandas as pd
 import plotly.express as px
@@ -58,6 +59,32 @@ status = load_csv("dora_observation_status.csv")
 sensitivity = load_csv("dora_threshold_sensitivity.csv")
 summary = load_summary()
 ranked_pairs = load_csv("dora_ranked_candidates.csv")
+sensor_raw_summary = load_csv("sensor_raw_platform_summary.csv")
+sensor_confidence_counts = load_csv("sensor_native_confidence_counts.csv")
+sensor_one_to_one = load_csv("sensor_one_to_one_baseline.csv")
+sensor_date_bootstrap = load_csv("sensor_date_cluster_bootstrap.csv")
+sensor_threshold_bootstrap = load_csv("sensor_threshold_bootstrap.csv")
+
+ANOMALY_DIR = DATA / "anomaly_20230301_20230531"
+
+def load_anomaly_csv(name):
+    file_path = ANOMALY_DIR / name
+    if not file_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(file_path)
+    except Exception as exc:
+        st.warning(f"Could not read anomaly output {name}: {exc}")
+        return pd.DataFrame()
+
+anomaly_activity = load_anomaly_csv("daily_grid_activity.csv")
+anomaly_alerts = load_anomaly_csv("anomaly_alerts.csv")
+
+anomaly_summary_path = ANOMALY_DIR / "anomaly_summary.json"
+try:
+    anomaly_summary = json.loads(anomaly_summary_path.read_text(encoding="utf-8"))
+except Exception:
+    anomaly_summary = {}
 
 ambiguity_summary_path = DATA / "dora_ambiguity_summary.json"
 ambiguity_summary = (
@@ -136,13 +163,15 @@ m2.metric("Sensors", sensor_count)
 m3.metric("Platforms", unique_platforms)
 m4.metric("Acquisition dates", date_count)
 
-tab_overview, tab_dora, tab_data, tab_method, tab_sensor = st.tabs(
+tab_overview, tab_dora, tab_data, tab_method, tab_sensor, tab_anomaly, tab_research = st.tabs(
     [
         "Overview",
         "DORA analysis",
         "Data explorer",
         "Methodology & limitations",
         "Sensor Explorer",
+        "Anomaly Detection",
+        "Research Explorer",
     ]
 )
 
@@ -525,8 +554,9 @@ with tab_sensor:
         )
 
         if selected_platform == "Terra":
+            terra_count = int((obs["platform"] == "Terra").sum())
             st.warning(
-                "MODIS Terra has only 10 observations in the complete "
+                f"MODIS Terra has {terra_count:,} observations in the complete "
                 "current dataset. Treat its coverage and comparisons as limited."
             )
 
@@ -720,6 +750,109 @@ with tab_sensor:
                     hide_index=True,
                 )
 
+            st.markdown("### Cross-sensor FRP comparability (exploratory)")
+
+            if sensor_raw_summary.empty or sensor_one_to_one.empty:
+                st.info(
+                    "Sensor comparability outputs are not available in the production "
+                    "dataset yet. Run the validated comparability analysis to populate "
+                    "this section."
+                )
+            else:
+                st.caption(
+                    "FRP values are compared across candidate satellite-observation "
+                    "associations. These are not verified same-fire matches, ground "
+                    "truth, sensor calibration factors, or accuracy estimates."
+                )
+
+                st.markdown("#### Raw platform-level observations")
+                st.dataframe(
+                    sensor_raw_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if {"platform", "frp_median_mw", "sensor"}.issubset(
+                    sensor_raw_summary.columns
+                ):
+                    fig = px.bar(
+                        sensor_raw_summary,
+                        x="platform",
+                        y="frp_median_mw",
+                        color="sensor",
+                        barmode="group",
+                        title="Median native FRP by platform",
+                        labels={
+                            "platform": "Platform",
+                            "frp_median_mw": "Median FRP (MW)",
+                            "sensor": "Sensor family",
+                        },
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### One-to-one candidate comparison")
+                if not sensor_date_bootstrap.empty:
+                    baseline_view = sensor_one_to_one.merge(
+                        sensor_date_bootstrap,
+                        on="platform",
+                        how="left",
+                        suffixes=("", "_bootstrap"),
+                    )
+                    preferred = [
+                        "platform",
+                        "candidate_pairs",
+                        "one_to_one_pairs",
+                        "unique_dates",
+                        "median_frp_ratio",
+                        "median_daily_ratio",
+                        "cluster_bootstrap_95_low",
+                        "cluster_bootstrap_95_high",
+                        "median_distance_km",
+                        "median_time_gap_min",
+                    ]
+                    baseline_view = baseline_view[
+                        [c for c in preferred if c in baseline_view.columns]
+                    ]
+                    st.dataframe(
+                        baseline_view,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.dataframe(
+                        sensor_one_to_one,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                st.markdown("#### Matching-threshold robustness")
+                if not sensor_threshold_bootstrap.empty:
+                    st.dataframe(
+                        sensor_threshold_bootstrap,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Threshold sensitivity output is not available.")
+
+                st.markdown("#### Native confidence distributions")
+                if not sensor_confidence_counts.empty:
+                    st.dataframe(
+                        sensor_confidence_counts,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Native confidence output is not available.")
+
+                st.warning(
+                    "Interpretation: FRP ratios below 1 describe lower VIIRS FRP "
+                    "within the selected candidate associations. They do not by "
+                    "themselves establish sensor bias or justify a calibration "
+                    "correction. Confidence categories remain sensor-native and "
+                    "must not be treated as interchangeable."
+                )
+
             st.download_button(
                 "Download selected platform observations CSV",
                 platform_df.drop(columns=["_date"], errors="ignore")
@@ -736,5 +869,616 @@ with tab_sensor:
                 "preliminary and are not independently confirmed fire events."
             )
 
+
+with tab_anomaly:
+    st.subheader("Historical Fire-Observation Anomaly Detection")
+    st.caption(
+        "Platform-stratified, 5 km grid-level statistical monitoring. "
+        "Alerts indicate unusual satellite observation volume, not confirmed fire outbreaks."
+    )
+
+    if anomaly_activity.empty:
+        st.warning(
+            "Anomaly outputs are unavailable. Run scripts/run_anomaly_detection.py "
+            "to generate the activity and alert files."
+        )
+    else:
+        severity_counts = anomaly_summary.get("severity_counts", {})
+        total_rows = int(anomaly_summary.get("daily_grid_platform_rows", len(anomaly_activity)))
+        alert_rows = int(anomaly_summary.get("alert_rows", len(anomaly_alerts)))
+        insufficient = int(severity_counts.get("insufficient_history", 0))
+        coverage = (100 * (total_rows - insufficient) / total_rows) if total_rows else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Alert records", f"{alert_rows:,}")
+        m2.metric("High alerts", f"{severity_counts.get('high', 0):,}")
+        m3.metric("Scored records", f"{total_rows - insufficient:,}")
+        m4.metric("Scoring coverage", f"{coverage:.1f}%")
+
+        st.warning(
+            f"{insufficient:,} of {total_rows:,} platform-grid records have insufficient "
+            "history. These records were not scored. Missing satellite observations "
+            "are not interpreted as zero fire activity."
+        )
+
+        if not anomaly_alerts.empty:
+            alert_view = anomaly_alerts.copy()
+            alert_view["date"] = alert_view["date"].astype(str)
+            alert_view["platform"] = alert_view["platform"].astype(str)
+            alert_view["severity"] = alert_view["severity"].astype(str)
+
+            c1, c2, c3 = st.columns(3)
+            platforms_available = sorted(alert_view["platform"].dropna().unique().tolist())
+            chosen_platform = c1.selectbox(
+                "Platform",
+                ["All"] + platforms_available,
+                key="anomaly_platform_filter",
+            )
+
+            severities_available = ["low", "medium", "high"]
+            chosen_severities = c2.multiselect(
+                "Alert severity",
+                severities_available,
+                default=severities_available,
+                key="anomaly_severity_filter",
+            )
+
+            dates_available = sorted(alert_view["date"].dropna().unique().tolist())
+            if len(dates_available) > 1:
+                chosen_dates = c3.select_slider(
+                    "Alert date range",
+                    options=dates_available,
+                    value=(dates_available[0], dates_available[-1]),
+                    key="anomaly_date_filter",
+                )
+            elif dates_available:
+                chosen_dates = (dates_available[0], dates_available[0])
+                c3.caption(f"Only available alert date: {dates_available[0]}")
+            else:
+                chosen_dates = ("", "")
+
+            selected = alert_view.copy()
+            if chosen_platform != "All":
+                selected = selected[selected["platform"] == chosen_platform]
+            selected = selected[selected["severity"].isin(chosen_severities)]
+            if chosen_dates[0]:
+                selected = selected[
+                    selected["date"].between(chosen_dates[0], chosen_dates[1])
+                ]
+
+            st.markdown("#### Selected alert summary")
+            counts = Counter(selected["severity"].tolist())
+            a, b, c, d = st.columns(4)
+            a.metric("Selected alerts", f"{len(selected):,}")
+            b.metric("Low", counts.get("low", 0))
+            c.metric("Medium", counts.get("medium", 0))
+            d.metric("High", counts.get("high", 0))
+
+            if selected.empty:
+                st.info("No alerts match the selected filters.")
+            else:
+                left, right = st.columns(2)
+
+                with left:
+                    severity_data = pd.DataFrame(
+                        [{"Severity": key, "Alerts": counts.get(key, 0)}
+                         for key in ["low", "medium", "high"]]
+                    )
+                    fig = px.bar(
+                        severity_data,
+                        x="Severity",
+                        y="Alerts",
+                        title="Alert severity distribution",
+                        text_auto=True,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with right:
+                    daily_counts = Counter(selected["date"].tolist())
+                    trend_data = pd.DataFrame(
+                        [{"Date": key, "Alerts": value}
+                         for key, value in sorted(daily_counts.items())]
+                    )
+                    fig = px.line(
+                        trend_data,
+                        x="Date",
+                        y="Alerts",
+                        markers=True,
+                        title="Daily anomaly alerts",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### Repeated alert grids")
+                repeated = Counter(
+                    (str(row["platform"]), str(row["grid_id"]))
+                    for _, row in selected.iterrows()
+                )
+                repeated_rows = []
+                for (platform, grid), number_of_days in repeated.most_common(20):
+                    subset = selected[
+                        (selected["platform"] == platform)
+                        & (selected["grid_id"] == grid)
+                    ]
+                    repeated_rows.append({
+                        "Platform": platform,
+                        "Grid": grid,
+                        "Alert days": number_of_days,
+                        "First alert": subset["date"].min(),
+                        "Last alert": subset["date"].max(),
+                    })
+                st.dataframe(
+                    pd.DataFrame(repeated_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.markdown("#### Alert observation details")
+                display_columns = [
+                    col for col in [
+                        "date", "platform", "grid_id", "observation_count",
+                        "baseline_median", "baseline_mad", "prior_active_days",
+                        "robust_score", "severity", "interpretation"
+                    ] if col in selected.columns
+                ]
+                st.dataframe(
+                    selected[display_columns].sort_values(
+                        ["date", "robust_score"], ascending=[False, False]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "Download filtered anomaly alerts CSV",
+                    selected.to_csv(index=False).encode("utf-8"),
+                    file_name="fireharmonics_filtered_anomaly_alerts.csv",
+                    mime="text/csv",
+                    key="anomaly_alert_download",
+                )
+
+        else:
+            st.info("No anomaly alerts were generated for this dataset.")
+
+        st.markdown("#### Detection method and limitations")
+        st.write(
+            f"Grid size: {anomaly_summary.get('grid_km', 'N/A')} km · "
+            f"Baseline window: {anomaly_summary.get('baseline_days', 'N/A')} days · "
+            f"Minimum prior active days: "
+            f"{anomaly_summary.get('min_prior_active_days', 'N/A')}"
+        )
+        for limitation in anomaly_summary.get("limitations", []):
+            st.caption("• " + limitation)
+
+        if not anomaly_activity.empty:
+            st.download_button(
+                "Download complete daily grid activity CSV",
+                anomaly_activity.to_csv(index=False).encode("utf-8"),
+                file_name="fireharmonics_daily_grid_activity.csv",
+                mime="text/csv",
+                key="anomaly_activity_download",
+            )
+
+
 st.divider()
+
+
+# FIREHARMONICS_PROBLEM8_RESEARCH_EXPLORER
+with tab_research:
+    st.subheader("NASA Historical Research Explorer")
+    st.caption(
+        "Interactive exploration of the verified local project outputs. "
+        "The historical archive is not a live satellite feed."
+    )
+
+    STAGING = ROOT / "data" / "staging"
+    P1 = STAGING / "problem1_nasa_20261115_193025"
+    P2 = P1 / "problem2_activity_calendar"
+    P5 = STAGING / "problem5_nasa_hls_l30_inventory_20261115_200405"
+    P6 = STAGING / "problem6_historical_anomaly_20261115_202004"
+    P7 = STAGING / "problem7_critical_burning_windows_20261115"
+
+    @st.cache_data(show_spinner="Loading project research data...")
+    def _fh_read_csv(path_string):
+        return pd.read_csv(path_string, low_memory=False)
+
+    def _fh_optional_csv(path):
+        if path is None or not Path(path).exists():
+            return pd.DataFrame()
+        try:
+            return _fh_read_csv(str(path))
+        except Exception as exc:
+            st.warning(f"Could not load {Path(path).name}: {exc}")
+            return pd.DataFrame()
+
+    def _fh_first_match(pattern):
+        found = sorted(P1.glob(pattern))
+        return found[0] if found else None
+
+    observations_path = P1 / "processed" / "harmonized_observations.csv"
+    observations = _fh_optional_csv(observations_path)
+
+    if observations.empty:
+        st.error("Canonical harmonized observation dataset is missing or empty.")
+    else:
+        required = {"acq_date", "platform", "sensor", "latitude", "longitude"}
+        missing = required.difference(observations.columns)
+        if missing:
+            st.error(f"Required observation columns missing: {sorted(missing)}")
+        else:
+            observations = observations.copy()
+            observations["acq_date"] = observations["acq_date"].astype(str)
+
+            st.markdown("#### Observation filters")
+            f1, f2, f3 = st.columns(3)
+
+            platforms = sorted(observations["platform"].dropna().astype(str).unique())
+            sensors = sorted(observations["sensor"].dropna().astype(str).unique())
+
+            selected_platforms = f1.multiselect(
+                "Satellite platforms",
+                platforms,
+                default=platforms,
+                key="p8_platforms",
+            )
+            selected_sensors = f2.multiselect(
+                "Sensors",
+                sensors,
+                default=sensors,
+                key="p8_sensors",
+            )
+
+            valid_dates = pd.to_datetime(
+                observations["acq_date"], errors="coerce"
+            ).dropna()
+            min_date = valid_dates.min().date()
+            max_date = valid_dates.max().date()
+
+            date_selection = f3.date_input(
+                "Acquisition date range",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+                key="p8_date_range",
+            )
+
+            filtered = observations[
+                observations["platform"].astype(str).isin(selected_platforms)
+                & observations["sensor"].astype(str).isin(selected_sensors)
+            ].copy()
+
+            if isinstance(date_selection, (tuple, list)) and len(date_selection) == 2:
+                start_date, end_date = date_selection
+                filtered_dates = pd.to_datetime(
+                    filtered["acq_date"], errors="coerce"
+                )
+                filtered = filtered[
+                    filtered_dates.between(
+                        pd.Timestamp(start_date), pd.Timestamp(end_date)
+                    )
+                ]
+
+            total = len(filtered)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Filtered observations", f"{total:,}")
+            m2.metric("Platforms", f"{filtered['platform'].nunique():,}")
+            m3.metric("Sensors", f"{filtered['sensor'].nunique():,}")
+            m4.metric("Observation dates", f"{filtered['acq_date'].nunique():,}")
+
+            if filtered.empty:
+                st.info("No observations match the selected filters.")
+            else:
+                st.markdown("#### Temporal activity")
+                daily = (
+                    filtered.groupby("acq_date")
+                    .size()
+                    .rename("Observations")
+                    .reset_index()
+                    .sort_values("acq_date")
+                )
+                fig = px.line(
+                    daily,
+                    x="acq_date",
+                    y="Observations",
+                    title="Daily satellite observation volume",
+                    labels={"acq_date": "Acquisition date"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                left, right = st.columns(2)
+                with left:
+                    platform_counts = (
+                        filtered["platform"].value_counts()
+                        .rename_axis("Platform")
+                        .reset_index(name="Observations")
+                    )
+                    fig = px.bar(
+                        platform_counts,
+                        x="Platform",
+                        y="Observations",
+                        color="Platform",
+                        title="Observations by platform",
+                        text_auto=True,
+                    )
+                    fig.update_layout(showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with right:
+                    sensor_counts = (
+                        filtered["sensor"].value_counts()
+                        .rename_axis("Sensor")
+                        .reset_index(name="Observations")
+                    )
+                    fig = px.pie(
+                        sensor_counts,
+                        names="Sensor",
+                        values="Observations",
+                        title="Sensor observation share",
+                        hole=0.45,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                if "frp_mw" in filtered.columns:
+                    frp = filtered.copy()
+                    frp["frp_mw"] = pd.to_numeric(frp["frp_mw"], errors="coerce")
+                    frp = frp.dropna(subset=["frp_mw"])
+                    if not frp.empty:
+                        frp_summary = (
+                            frp.groupby("sensor")["frp_mw"]
+                            .agg(["count", "median", "mean"])
+                            .reset_index()
+                        )
+                        st.markdown("#### Fire Radiative Power (FRP) observations")
+                        st.dataframe(
+                            frp_summary.rename(columns={
+                                "sensor": "Sensor",
+                                "count": "Observation count",
+                                "median": "Median FRP (MW)",
+                                "mean": "Mean FRP (MW)",
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.caption(
+                            "FRP summaries are descriptive and are not sensor calibration "
+                            "or direct measures of total fire energy."
+                        )
+
+                st.download_button(
+                    "Download filtered observations",
+                    filtered.to_csv(index=False).encode("utf-8"),
+                    file_name="fireharmonics_filtered_observations.csv",
+                    mime="text/csv",
+                    key="p8_download_observations",
+                )
+
+    st.divider()
+    st.markdown("#### DORA candidate relationships")
+    dora_path = _fh_first_match("problem3_dora_*/dora_candidate_pairs.csv")
+    dora = _fh_optional_csv(dora_path)
+
+    if dora.empty:
+        st.info("DORA candidate-pair output is unavailable.")
+    else:
+        st.caption(
+            "These are spatial-temporal candidate correspondences, not confirmed "
+            "matches of the same physical fire."
+        )
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Candidate pairs", f"{len(dora):,}")
+        if "distance_km" in dora.columns:
+            distance = pd.to_numeric(dora["distance_km"], errors="coerce").dropna()
+            d2.metric("Median distance", f"{distance.median():.3f} km" if not distance.empty else "N/A")
+            d3.metric("95th percentile", f"{distance.quantile(.95):.3f} km" if not distance.empty else "N/A")
+
+            fig = px.histogram(
+                dora,
+                x="distance_km",
+                nbins=45,
+                title="Spatial separation of DORA candidate pairs",
+                labels={"distance_km": "Distance (km)"},
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        display_cols = [
+            c for c in [
+                "date", "modis_platform", "viirs_platform",
+                "distance_km", "time_gap_minutes",
+                "modis_frp_mw", "viirs_frp_mw",
+            ] if c in dora.columns
+        ]
+        if display_cols:
+            st.dataframe(dora[display_cols].head(1000), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download DORA candidate pairs",
+            dora.to_csv(index=False).encode("utf-8"),
+            file_name="fireharmonics_dora_candidate_pairs.csv",
+            mime="text/csv",
+            key="p8_download_dora",
+        )
+
+    st.divider()
+    st.markdown("#### Cross-platform comparison")
+    comparison_path = _fh_first_match(
+        "problem4_sensor_comparability_*/sensor_one_to_one_baseline.csv"
+    )
+    comparison = _fh_optional_csv(comparison_path)
+
+    if comparison.empty:
+        st.info("Sensor comparability output is unavailable.")
+    else:
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        if {"platform", "median_frp_ratio"}.issubset(comparison.columns):
+            fig = px.bar(
+                comparison,
+                x="platform",
+                y="median_frp_ratio",
+                title="Median VIIRS-to-MODIS FRP ratio in one-to-one candidate pairs",
+                labels={
+                    "platform": "VIIRS platform",
+                    "median_frp_ratio": "Median FRP ratio",
+                },
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        st.warning(
+            "Exploratory comparison only: confidence schemes differ across sensors, "
+            "candidate pairs are not ground truth, and FRP ratios are not calibration "
+            "bias estimates."
+        )
+
+    st.divider()
+    st.markdown("#### Historical observation-volume anomalies")
+    alerts = _fh_optional_csv(P6 / "anomaly_alerts.csv")
+    anomaly_audit = {}
+    audit_path = P6 / "anomaly_summary.json"
+    if audit_path.exists():
+        try:
+            anomaly_audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    if alerts.empty:
+        st.info("Historical anomaly alerts are unavailable.")
+    else:
+        severity_counts = (
+            alerts["severity"].value_counts().to_dict()
+            if "severity" in alerts.columns else {}
+        )
+        a, b, c = st.columns(3)
+        a.metric("Alert records", f"{len(alerts):,}")
+        b.metric("High", f"{severity_counts.get('high', 0):,}")
+        c.metric("Medium", f"{severity_counts.get('medium', 0):,}")
+
+        if "severity" in alerts.columns:
+            sev = alerts["severity"].value_counts().rename_axis("Severity").reset_index(name="Alerts")
+            fig = px.bar(sev, x="Severity", y="Alerts", title="Anomaly alert severity")
+            st.plotly_chart(fig, use_container_width=True)
+
+        if "platform" in alerts.columns:
+            alert_platforms = ["All"] + sorted(alerts["platform"].dropna().astype(str).unique())
+            chosen_alert_platform = st.selectbox(
+                "Anomaly platform filter",
+                alert_platforms,
+                key="p8_anomaly_platform",
+            )
+            alert_view = alerts.copy()
+            if chosen_alert_platform != "All":
+                alert_view = alert_view[
+                    alert_view["platform"].astype(str) == chosen_alert_platform
+                ]
+            st.dataframe(alert_view.head(1000), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download anomaly alerts",
+                alert_view.to_csv(index=False).encode("utf-8"),
+                file_name="fireharmonics_anomaly_alerts.csv",
+                mime="text/csv",
+                key="p8_download_alerts",
+            )
+
+        st.caption(
+            "Alerts identify unusual satellite observation volume relative to a "
+            "platform/grid historical baseline. They are not confirmed fire outbreaks."
+        )
+
+    st.divider()
+    st.markdown("#### Critical observation-activity windows")
+    critical = _fh_optional_csv(P7 / "critical_burning_windows.csv")
+    critical_months = _fh_optional_csv(P7 / "critical_months.csv")
+
+    if critical.empty:
+        st.info("Critical-window analysis is unavailable.")
+    else:
+        st.dataframe(critical, use_container_width=True, hide_index=True)
+        st.warning(
+            "These are recurring high satellite-observation activity windows, "
+            "not independently verified fire seasons or causal fire-risk forecasts."
+        )
+
+    if not critical_months.empty:
+        st.markdown("##### Monthly activity profile")
+        if {"month_name", "mean_observations_per_active_day"}.issubset(critical_months.columns):
+            month_view = critical_months.sort_values("month")
+            fig = px.bar(
+                month_view,
+                x="month_name",
+                y="mean_observations_per_active_day",
+                title="Mean observations per active day by calendar month",
+                labels={
+                    "month_name": "Month",
+                    "mean_observations_per_active_day": "Mean observations / active day",
+                },
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(critical_months, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### NASA HLS Landsat corroboration inventory")
+    hls = _fh_optional_csv(P5 / "hls_l30_scene_inventory.csv")
+
+    if hls.empty:
+        st.info("HLS L30 scene inventory is unavailable.")
+    else:
+        h1, h2, h3 = st.columns(3)
+        h1.metric("Scene records", f"{len(hls):,}")
+        h2.metric(
+            "Candidate observations covered",
+            f"{hls['observation_uid'].nunique():,}" if "observation_uid" in hls.columns else "N/A",
+        )
+        h3.metric(
+            "Unique scenes",
+            f"{hls['scene_id'].nunique():,}" if "scene_id" in hls.columns else "N/A",
+        )
+
+        if "eo_cloud_cover_percent" in hls.columns:
+            hls["eo_cloud_cover_percent"] = pd.to_numeric(
+                hls["eo_cloud_cover_percent"], errors="coerce"
+            )
+            hls_cloud = hls.dropna(subset=["eo_cloud_cover_percent"])
+            if not hls_cloud.empty:
+                fig = px.histogram(
+                    hls_cloud,
+                    x="eo_cloud_cover_percent",
+                    nbins=20,
+                    title="HLS scene cloud-cover metadata",
+                    labels={"eo_cloud_cover_percent": "Cloud cover (%)"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        hls_cols = [
+            c for c in [
+                "observation_uid", "scene_id", "scene_datetime_utc",
+                "absolute_offset_hours", "eo_cloud_cover_percent",
+                "collection", "asset_keys",
+            ] if c in hls.columns
+        ]
+        st.dataframe(hls[hls_cols].head(1000), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download HLS scene inventory",
+            hls.to_csv(index=False).encode("utf-8"),
+            file_name="fireharmonics_hls_l30_scene_inventory.csv",
+            mime="text/csv",
+            key="p8_download_hls",
+        )
+        st.warning(
+            "This is a scene-availability and metadata inventory only. HLS L30 is "
+            "surface-reflectance imagery, not a thermal active-fire product. Pixel-level "
+            "QA and visual corroboration have not been completed."
+        )
+
+    st.divider()
+    st.markdown("#### Data provenance and interpretation")
+    st.write(
+        "Primary observation source: the locally archived NASA FIRMS standard-pixel "
+        "MODIS and VIIRS observations integrated in the project staging dataset."
+    )
+    st.write(
+        "Analysis outputs are local, reproducible project artifacts. Observation rows "
+        "are not equivalent to unique fire events; sensor coverage, overpass timing, "
+        "confidence definitions, and missing observations affect interpretation."
+    )
+    st.caption(
+        "NASA data use does not imply NASA review, partnership, endorsement, or validation "
+        "of FireHarmonics."
+    )
+
+
 st.caption("FireHarmonics • Exploratory research prototype • Interpret all candidate relationships with the stated limitations.")
