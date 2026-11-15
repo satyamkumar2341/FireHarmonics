@@ -23,3 +23,6 @@ reports/
 data/staging/
 *.backup*
 app_before_problem*.py
+
+# Local documentation backup
+README_before_final_update.md
