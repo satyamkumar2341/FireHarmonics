@@ -30,6 +30,9 @@ def run_dora(
 
     has_uid = "observation_uid" in df.columns
 
+    # Preserve original input rows for complete scope accounting.
+    df["_input_row_number"] = np.arange(1, len(df) + 1)
+
     if has_uid:
         df["observation_uid"] = (
             df["observation_uid"].astype("string").str.strip()
@@ -42,35 +45,105 @@ def run_dora(
     )
     df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
     df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["daynight"] = df["daynight"].astype(str).str.upper().str.strip()
 
-    df = df.dropna(subset=[
-        "observation_id", "latitude", "longitude", "acq_date",
-        "observation_datetime_utc", "daynight",
-    ])
-    df = df[
-        df["latitude"].between(-90, 90)
-        & df["longitude"].between(-180, 180)
-    ].copy()
+    # Normalize classification fields without changing source columns.
+    sensor = df["sensor"].astype("string").str.strip().str.upper()
+    platform = df["platform"].astype("string").str.strip().str.upper()
+    daynight = df["daynight"].astype("string").str.strip().str.upper()
+    acq_date = df["acq_date"].astype("string").str.strip()
 
-    modis = df[
-        (df["sensor"].str.upper() == "MODIS")
-        & (df["platform"].str.upper() == "AQUA")
-    ].copy()
+    exclusion_reason = pd.Series("", index=df.index, dtype="string")
 
-    viirs = df[df["sensor"].str.upper() == "VIIRS"].copy()
+    def mark_invalid(mask, reason):
+        target = exclusion_reason.eq("")
+        exclusion_reason.loc[mask & target] = reason
 
-    common_dates = sorted(
-        set(modis["acq_date"].astype(str))
-        & set(viirs["acq_date"].astype(str))
+    observation_id = df["observation_id"].astype("string").str.strip()
+    mark_invalid(
+        observation_id.isna() | observation_id.eq(""),
+        "missing_observation_id",
     )
+    mark_invalid(df["latitude"].isna(), "invalid_latitude")
+    mark_invalid(df["longitude"].isna(), "invalid_longitude")
+    mark_invalid(acq_date.isna() | acq_date.eq(""), "invalid_acq_date")
+    mark_invalid(
+        df["observation_datetime_utc"].isna(),
+        "invalid_observation_datetime_utc",
+    )
+    mark_invalid(daynight.isna() | ~daynight.isin(["D", "N"]), "invalid_daynight")
+    mark_invalid(
+        df["latitude"].notna() & ~df["latitude"].between(-90, 90),
+        "latitude_out_of_range",
+    )
+    mark_invalid(
+        df["longitude"].notna() & ~df["longitude"].between(-180, 180),
+        "longitude_out_of_range",
+    )
+    mark_invalid(sensor.isna() | sensor.eq(""), "invalid_sensor")
+    mark_invalid(platform.isna() | platform.eq(""), "invalid_platform")
 
-    modis = modis[
-        modis["acq_date"].astype(str).isin(common_dates)
+    valid_mask = exclusion_reason.eq("")
+    valid = df.loc[valid_mask].copy()
+    valid["_sensor_normalized"] = sensor.loc[valid_mask]
+    valid["_platform_normalized"] = platform.loc[valid_mask]
+    valid["_daynight_normalized"] = daynight.loc[valid_mask]
+    valid["_acq_date_normalized"] = acq_date.loc[valid_mask]
+
+    # DORA scope: MODIS Aqua and VIIRS on dates represented by both.
+    modis_aqua = valid[
+        (valid["_sensor_normalized"] == "MODIS")
+        & (valid["_platform_normalized"] == "AQUA")
+    ].copy()
+
+    viirs_all = valid[
+        valid["_sensor_normalized"] == "VIIRS"
+    ].copy()
+
+    modis_dates = set(modis_aqua["_acq_date_normalized"])
+    viirs_dates = set(viirs_all["_acq_date_normalized"])
+    common_dates = sorted(modis_dates & viirs_dates)
+
+    # Assign explicit exclusion reasons to otherwise valid observations.
+    non_aqua_modis = (
+        (valid["_sensor_normalized"] == "MODIS")
+        & (valid["_platform_normalized"] != "AQUA")
+    )
+    exclusion_reason.loc[valid.index[non_aqua_modis]] = "modis_non_aqua_platform"
+
+    unsupported = ~valid["_sensor_normalized"].isin(["MODIS", "VIIRS"])
+    exclusion_reason.loc[valid.index[unsupported]] = "unsupported_sensor"
+
+    aqua_without_viirs = (
+        (valid["_sensor_normalized"] == "MODIS")
+        & (valid["_platform_normalized"] == "AQUA")
+        & ~valid["_acq_date_normalized"].isin(viirs_dates)
+    )
+    exclusion_reason.loc[valid.index[aqua_without_viirs]] = "no_same_date_viirs"
+
+    viirs_without_aqua = (
+        (valid["_sensor_normalized"] == "VIIRS")
+        & ~valid["_acq_date_normalized"].isin(modis_dates)
+    )
+    exclusion_reason.loc[valid.index[viirs_without_aqua]] = "no_same_date_modis_aqua"
+
+    eligible = valid[
+        valid["_acq_date_normalized"].isin(common_dates)
+        & (
+            (
+                (valid["_sensor_normalized"] == "MODIS")
+                & (valid["_platform_normalized"] == "AQUA")
+            )
+            | (valid["_sensor_normalized"] == "VIIRS")
+        )
+    ].copy()
+
+    modis = eligible[
+        (eligible["_sensor_normalized"] == "MODIS")
+        & (eligible["_platform_normalized"] == "AQUA")
     ].reset_index(drop=True)
 
-    viirs = viirs[
-        viirs["acq_date"].astype(str).isin(common_dates)
+    viirs = eligible[
+        eligible["_sensor_normalized"] == "VIIRS"
     ].reset_index(drop=True)
 
     pair_columns = [
@@ -109,10 +182,10 @@ def run_dora(
             for j, distance in zip(js, ds):
                 v = viirs.iloc[int(j)]
 
-                if str(m["acq_date"]) != str(v["acq_date"]):
+                if str(m["_acq_date_normalized"]) != str(v["_acq_date_normalized"]):
                     continue
 
-                if m["daynight"] != v["daynight"]:
+                if m["_daynight_normalized"] != v["_daynight_normalized"]:
                     continue
 
                 gap = abs(
@@ -132,8 +205,8 @@ def run_dora(
                         }
                         if has_uid else {}
                     ),
-                    "date": str(m["acq_date"]),
-                    "daynight": m["daynight"],
+                    "date": str(m["_acq_date_normalized"]),
+                    "daynight": m["_daynight_normalized"],
                     "modis_platform": m["platform"],
                     "viirs_platform": v["platform"],
                     "distance_km": float(distance * EARTH_RADIUS_KM),
@@ -196,8 +269,8 @@ def run_dora(
             ),
             "sensor": "MODIS",
             "platform": obs["platform"],
-            "date": obs["acq_date"],
-            "daynight": obs["daynight"],
+            "date": obs["_acq_date_normalized"],
+            "daynight": obs["_daynight_normalized"],
             "candidate_count": count,
             "candidate_status": (
                 "unmatched_under_criteria" if count == 0
@@ -216,8 +289,8 @@ def run_dora(
             ),
             "sensor": "VIIRS",
             "platform": obs["platform"],
-            "date": obs["acq_date"],
-            "daynight": obs["daynight"],
+            "date": obs["_acq_date_normalized"],
+            "daynight": obs["_daynight_normalized"],
             "candidate_count": count,
             "candidate_status": (
                 "unmatched_under_criteria" if count == 0
@@ -228,17 +301,49 @@ def run_dora(
 
     status = pd.DataFrame(status_rows)
 
+    # Exclusion report includes invalid records and valid records outside DORA scope.
+    excluded_mask = ~exclusion_reason.eq("")
+    excluded = df.loc[excluded_mask].copy()
+    excluded["exclusion_reason"] = exclusion_reason.loc[excluded_mask]
+
+    exclusion_columns = [
+        "_input_row_number", "observation_id",
+        *(["observation_uid"] if has_uid else []),
+        "sensor", "platform", "acq_date", "exclusion_reason",
+    ]
+    exclusions = excluded[exclusion_columns].rename(
+        columns={"_input_row_number": "input_row_number"}
+    )
+
     spatial.to_csv(output / "dora_spatial_candidates_5km.csv", index=False)
     baseline.to_csv(output / "dora_candidate_pairs.csv", index=False)
     status.to_csv(output / "dora_observation_status.csv", index=False)
     sensitivity.to_csv(
         output / "dora_threshold_sensitivity.csv", index=False
     )
+    exclusions.to_csv(output / "dora_scope_exclusions.csv", index=False)
+
+    reason_counts = (
+        exclusions["exclusion_reason"].value_counts().sort_index().to_dict()
+    )
+
+    input_count = len(df)
+    valid_count = int(valid_mask.sum())
+    audited_count = len(eligible)
+    excluded_count = len(exclusions)
 
     summary = {
         "method": "DORA exploratory candidate matching",
         "primary_modis_platform": "Aqua",
         "common_dates": common_dates,
+        "input_observations": input_count,
+        "valid_observations": valid_count,
+        "audited_observations": audited_count,
+        "excluded_observations": excluded_count,
+        "scope_accounting_complete": (
+            input_count == audited_count + excluded_count
+        ),
+        "exclusions_by_reason": reason_counts,
         "modis_aqua_observations": len(modis),
         "viirs_observations": len(viirs),
         "spatial_candidates_within_5km": len(spatial),
@@ -250,7 +355,8 @@ def run_dora(
         "warning": (
             "Candidate relationships are not confirmed fire-event matches. "
             "Unmatched means no candidate under these criteria, "
-            "not a confirmed sensor miss."
+            "not a confirmed sensor miss. Excluded observations are outside "
+            "the current MODIS Aqua/VIIRS common-date audit scope."
         ),
     }
 

@@ -11,6 +11,10 @@ SUPPORTED_PREFIXES = (
     "MODIS_NRT_",
     "VIIRS_NOAA20_NRT_",
     "VIIRS_NOAA21_NRT_",
+    "MODIS_SP_",
+    "VIIRS_SNPP_SP_",
+    "VIIRS_NOAA20_SP_",
+    "VIIRS_NOAA21_SP_",
 )
 
 
@@ -79,9 +83,16 @@ def normalize_file(file_path):
     df = pd.read_csv(file_path)
     df.columns = df.columns.str.strip().str.lower()
 
-    source = file_path.name.split("_20", 1)[0]
+    source = next(
+        (
+            prefix[:-1]
+            for prefix in SUPPORTED_PREFIXES
+            if file_path.name.startswith(prefix)
+        ),
+        None,
+    )
 
-    if source == "MODIS_NRT":
+    if source in ("MODIS_NRT", "MODIS_SP"):
         sensor = "MODIS"
         brightness_column = "brightness"
         brightness_band = "MODIS brightness"
@@ -90,12 +101,21 @@ def normalize_file(file_path):
             "acq_time", "satellite", "instrument",
             "confidence", "frp", brightness_column, "daynight"
         ]
-    elif source in ("VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"):
+    elif source in (
+        "VIIRS_NOAA20_NRT",
+        "VIIRS_NOAA21_NRT",
+        "VIIRS_SNPP_SP",
+        "VIIRS_NOAA20_SP",
+        "VIIRS_NOAA21_SP",
+    ):
         sensor = "VIIRS"
-        platform = (
-            "NOAA-20" if source == "VIIRS_NOAA20_NRT"
-            else "NOAA-21"
-        )
+        platform = {
+            "VIIRS_SNPP_SP": "Suomi-NPP",
+            "VIIRS_NOAA20_NRT": "NOAA-20",
+            "VIIRS_NOAA20_SP": "NOAA-20",
+            "VIIRS_NOAA21_NRT": "NOAA-21",
+            "VIIRS_NOAA21_SP": "NOAA-21",
+        }[source]
         brightness_column = "bright_ti4"
         brightness_band = "VIIRS I4"
         required = [
@@ -156,8 +176,12 @@ def normalize_file(file_path):
     result["brightness_band"] = brightness_band
 
     result["daynight"] = df["daynight"].astype(str).str.upper()
-    result["scan"] = pd.to_numeric(df["scan"], errors="coerce")
-    result["track"] = pd.to_numeric(df["track"], errors="coerce")
+    result["scan"] = pd.to_numeric(
+        df["scan"], errors="coerce"
+    ) if "scan" in df.columns else float("nan")
+    result["track"] = pd.to_numeric(
+        df["track"], errors="coerce"
+    ) if "track" in df.columns else float("nan")
 
     result["source_file"] = file_path.name
     result["region"] = "Punjab-Haryana"

@@ -223,3 +223,96 @@ def test_dora_rejects_missing_observation_uid(tmp_path):
 
     with pytest.raises(ValueError, match="observation_uid contains missing"):
         run_dora(input_path=source, output_dir=tmp_path / "out")
+
+def test_dora_scope_accounting_captures_all_exclusions(tmp_path):
+    observations = make_observations()
+
+    terra = observations.iloc[0].copy()
+    terra["observation_id"] = "TERRA1"
+    terra["platform"] = "Terra"
+
+    viirs_no_aqua = observations.iloc[2].copy()
+    viirs_no_aqua["observation_id"] = "V5"
+    viirs_no_aqua["acq_date"] = "2026-11-12"
+    viirs_no_aqua["observation_datetime_utc"] = "2026-11-12T11:00:00Z"
+
+    aqua_no_viirs = observations.iloc[0].copy()
+    aqua_no_viirs["observation_id"] = "M3"
+    aqua_no_viirs["acq_date"] = "2026-11-13"
+    aqua_no_viirs["observation_datetime_utc"] = "2026-11-13T10:00:00Z"
+
+    invalid = observations.iloc[0].copy()
+    invalid["observation_id"] = "BAD1"
+    invalid["latitude"] = 91.0
+
+    observations = pd.concat(
+        [observations, pd.DataFrame([terra, viirs_no_aqua, aqua_no_viirs, invalid])],
+        ignore_index=True,
+    )
+
+    source = tmp_path / "observations.csv"
+    output = tmp_path / "out"
+    observations.to_csv(source, index=False)
+
+    summary = run_dora(input_path=source, output_dir=output)
+
+    exclusions = pd.read_csv(output / "dora_scope_exclusions.csv")
+    reasons = exclusions.set_index("observation_id")["exclusion_reason"]
+
+    assert reasons["TERRA1"] == "modis_non_aqua_platform"
+    assert reasons["V4"] == "no_same_date_modis_aqua"
+    assert reasons["V5"] == "no_same_date_modis_aqua"
+    assert reasons["M3"] == "no_same_date_viirs"
+    assert reasons["BAD1"] == "latitude_out_of_range"
+    assert summary["input_observations"] == 10
+    assert summary["audited_observations"] == 5
+    assert summary["excluded_observations"] == 5
+    assert summary["scope_accounting_complete"] is True
+
+
+def test_dora_scope_exclusion_report_preserves_input_row_numbers(tmp_path):
+    observations = make_observations()
+    source = tmp_path / "observations.csv"
+    output = tmp_path / "out"
+    observations.to_csv(source, index=False)
+
+    run_dora(input_path=source, output_dir=output)
+    exclusions = pd.read_csv(output / "dora_scope_exclusions.csv")
+
+    assert "input_row_number" in exclusions.columns
+    assert exclusions["input_row_number"].is_unique
+    assert set(exclusions["observation_id"]) == {"V4"}
+
+
+def test_dora_scope_accounting_summary_matches_output_files(tmp_path):
+    observations = make_observations()
+    source = tmp_path / "observations.csv"
+    output = tmp_path / "out"
+    observations.to_csv(source, index=False)
+
+    summary = run_dora(input_path=source, output_dir=output)
+    status = pd.read_csv(output / "dora_observation_status.csv")
+    exclusions = pd.read_csv(output / "dora_scope_exclusions.csv")
+
+    assert len(status) == summary["audited_observations"]
+    assert len(exclusions) == summary["excluded_observations"]
+    assert len(status) + len(exclusions) == summary["input_observations"]
+    assert summary["scope_accounting_complete"] is True
+
+def test_dora_rejects_blank_observation_id(tmp_path):
+    observations = make_observations()
+    observations.loc[0, "observation_id"] = "   "
+
+    source = tmp_path / "observations.csv"
+    output = tmp_path / "out"
+    observations.to_csv(source, index=False)
+
+    summary = run_dora(input_path=source, output_dir=output)
+
+    exclusions = pd.read_csv(output / "dora_scope_exclusions.csv")
+
+    assert "missing_observation_id" in exclusions["exclusion_reason"].values
+    assert summary["scope_accounting_complete"] is True
+    assert summary["input_observations"] == (
+        summary["audited_observations"] + summary["excluded_observations"]
+    )

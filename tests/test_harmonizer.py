@@ -243,3 +243,82 @@ def test_staging_build_preserves_production_ids(tmp_path):
 
     assert production_hash_before == production_hash_after
     assert (staging_dir / "harmonized_observations.csv").exists()
+
+
+
+@pytest.mark.parametrize(
+    "filename, expected_platform",
+    [
+        ("VIIRS_SNPP_SP_20251110.csv", "Suomi-NPP"),
+        ("VIIRS_NOAA20_SP_20251110.csv", "NOAA-20"),
+        ("VIIRS_NOAA21_SP_20251110.csv", "NOAA-21"),
+    ],
+)
+def test_viirs_sp_sources_preserve_platform_and_native_fields(
+    tmp_path, filename, expected_platform
+):
+    path = tmp_path / filename
+    make_viirs_file(path)
+
+    result = normalize_file(path)
+
+    assert len(result) == 1
+    assert result.iloc[0]["sensor"] == "VIIRS"
+    assert result.iloc[0]["platform"] == expected_platform
+    assert result.iloc[0]["confidence_native"] == "n"
+    assert result.iloc[0]["confidence_scheme"] == "nominal"
+    assert result.iloc[0]["brightness_native_kelvin"] == pytest.approx(340.2)
+    assert result.iloc[0]["brightness_band"] == "VIIRS I4"
+
+
+def test_modis_sp_preserves_aqua_and_terra_platforms(tmp_path):
+    path = tmp_path / "MODIS_SP_20251110.csv"
+    make_modis_file(path)
+
+    result = normalize_file(path)
+
+    assert len(result) == 2
+    assert set(result["sensor"]) == {"MODIS"}
+    assert set(result["platform"]) == {"Aqua", "Terra"}
+    assert set(result["confidence_scheme"]) == {"numeric_native"}
+    assert set(result["brightness_band"]) == {"MODIS brightness"}
+
+
+def test_sp_file_without_scan_track_is_normalized(tmp_path):
+    path = tmp_path / "VIIRS_SNPP_SP_20251110.csv"
+    make_viirs_file(path)
+
+    frame = pd.read_csv(path).drop(columns=["scan", "track"])
+    frame.to_csv(path, index=False)
+
+    result = normalize_file(path)
+
+    assert len(result) == 1
+    assert pd.isna(result.iloc[0]["scan"])
+    assert pd.isna(result.iloc[0]["track"])
+
+
+def test_build_dataset_discovers_sp_sources(tmp_path, monkeypatch):
+    import src.harmonizer as harmonizer
+
+    raw_dir = tmp_path / "raw"
+    output_dir = tmp_path / "processed"
+    raw_dir.mkdir()
+
+    make_modis_file(raw_dir / "MODIS_SP_20251110.csv")
+    make_viirs_file(raw_dir / "VIIRS_SNPP_SP_20251110.csv")
+    make_viirs_file(raw_dir / "VIIRS_NOAA20_SP_20251110.csv")
+    make_viirs_file(raw_dir / "VIIRS_NOAA21_SP_20251110.csv")
+
+    monkeypatch.setattr(harmonizer, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(harmonizer, "OUTPUT_DIR", output_dir)
+
+    result = build_harmonized_dataset()
+
+    assert set(result["sensor"]) == {"MODIS", "VIIRS"}
+    assert set(result["platform"]) == {
+        "Aqua", "Terra", "Suomi-NPP", "NOAA-20", "NOAA-21"
+    }
+    assert result["observation_id"].is_unique
+    assert result["observation_uid"].is_unique
+    assert (output_dir / "harmonized_observations.csv").exists()
